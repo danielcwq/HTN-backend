@@ -22,9 +22,9 @@ class HRMDataLogger:
     """Main data logger that connects BLE bridge to database"""
     
     def __init__(self, 
-                 ws_url: str = "ws://localhost:8000/ws/ingest",
+                 ws_url: str = "ws://localhost:8000",
                  db_path: str = "localDB/hrm_data.db",
-                 buffer_size: int = 30,
+                 buffer_size: int = 1,
                  gap_seconds: int = 300):
         """
         Initialize data logger
@@ -136,12 +136,17 @@ class HRMDataLogger:
                 # Add to buffer
                 buffer_full = self.processor.add_to_buffer(session_id, processed)
                 
-                # Flush if buffer is full
-                if buffer_full:
-                    await self._flush_buffer(session_id)
-                
                 # Update stats
                 self.stats['total_records'] += 1
+                
+                # Debug: Print every 10th record to see if data is flowing
+                if self.stats['total_records'] % 10 == 0:
+                    print(f"📝 Received {self.stats['total_records']} records, buffer size: {len(self.processor.buffers.get(session_id, []))}/{self.processor.buffer_size}")
+                
+                # Flush if buffer is full
+                if buffer_full:
+                    print(f"🔄 Buffer full for session {session_id}, flushing...")
+                    await self._flush_buffer(session_id)
                 
                 # Print status every 50 records
                 if self.stats['total_records'] % 50 == 0:
@@ -161,8 +166,14 @@ class HRMDataLogger:
             records = self.processor.get_buffer(session_id)
             if records:
                 count = self.db.batch_insert_raw_metrics(session_id, records)
-                self.session_manager.update_activity(session_id.split('_')[1])  # Extract device_id
+                # Get device_id from the session's data
+                if records and 'device_id' in self.session_manager.active_sessions.values():
+                    for dev_id, sess_id in self.session_manager.active_sessions.items():
+                        if sess_id == session_id:
+                            self.session_manager.update_activity(dev_id)
+                            break
                 self.stats['last_flush'] = time.time()
+                print(f"💾 Flushed {count} records to database")
                 return count
         else:
             # Flush all buffers
@@ -274,8 +285,8 @@ async def main():
                        help="WebSocket URL (default: ws://localhost:8000/ws/ingest)")
     parser.add_argument("--db", default="localDB/hrm_data.db",
                        help="Database path (default: localDB/hrm_data.db)")
-    parser.add_argument("--buffer", type=int, default=30,
-                       help="Buffer size before batch write (default: 30)")
+    parser.add_argument("--buffer", type=int, default=5,
+                       help="Buffer size before batch write (default: 5)")
     parser.add_argument("--gap", type=int, default=300,
                        help="Session gap in seconds (default: 300)")
     
