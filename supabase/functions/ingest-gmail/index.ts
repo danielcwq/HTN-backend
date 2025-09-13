@@ -1,96 +1,149 @@
-// deno-lint-ignore-file no-explicit-any
+// supabase/functions/ingest-gmail/index.ts
 import { serve } from "https://deno.land/std/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { refreshAccessToken } from "../_shared/google_oauth.ts";
 
-const SB_URL = Deno.env.get("SUPABASE_URL")!;
-const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const sb = createClient(SB_URL, SB_KEY);
-
-const CLIENT_ID = Deno.env.get("GOOGLE_CLIENT_ID")!;
-const CLIENT_SECRET = Deno.env.get("GOOGLE_CLIENT_SECRET")!;
-const REFRESH = Deno.env.get("GMAIL_REFRESH_TOKEN")!;
-const WINDOW_DAYS = Number(Deno.env.get("GMAIL_QUERY_WINDOW_DAYS") ?? "14");
-
-// Map RFC 2822 headers from Gmail metadata
-function header(h: any[], name: string) {
-  const f = h?.find((x: any) => x.name?.toLowerCase() === name.toLowerCase());
-  return f?.value ?? null;
+async function refreshAccessToken(refreshToken: string, clientId: string, clientSecret: string) {
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+      grant_type: "refresh_token",
+    }),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Token refresh failed: ${res.status} ${text}`);
+  const json = JSON.parse(text);
+  return json.access_token as string;
 }
 
 serve(async () => {
-  const accessToken = await refreshAccessToken(REFRESH, CLIENT_ID, CLIENT_SECRET);
+  const debug: Record<string, unknown> = {};
+  try {
+    // 0) Env check
+    const SB_URL = Deno.env.get("SUPABASE_URL");
+    const SB_KEY = Deno.env.get("SERVICE_ROLE_KEY");
+    const CLIENT_ID = Deno.env.get("GOOGLE_CLIENT_ID");
+    const CLIENT_SECRET = Deno.env.get("GOOGLE_CLIENT_SECRET");
+    const REFRESH = Deno.env.get("GOOGLE_REFRESH_TOKEN");
 
-  // Grab source_id for Gmail
-  const { data: src } = await sb.from("sources").select("source_id").eq("kind","gmail").limit(1).single();
-  if (!src) throw new Error("No sources row for kind='gmail'");
-
-  // Simple, robust strategy: scan last N days and upsert by message.id (dedupe via unique index)
-  const afterISO = new Date(Date.now() - WINDOW_DAYS*86400_000);
-  const q = `newer_than:${WINDOW_DAYS}d -category:{promotions social} -in:drafts`; // tune as you like
-
-  // 1) List message ids
-  let pageToken: string | undefined = undefined;
-  const ids: string[] = [];
-  do {
-    const url = new URL(`https://gmail.googleapis.com/gmail/v1/users/me/messages`);
-    url.searchParams.set("q", q);
-    if (pageToken) url.searchParams.set("pageToken", pageToken);
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` }});
-    const json = await res.json();
-    (json.messages ?? []).forEach((m: any) => ids.push(m.id));
-    pageToken = json.nextPageToken;
-  } while (pageToken);
-
-  // 2) Fetch metadata per id and upsert as events
-  for (const id of ids) {
-    const url = new URL(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}`);
-    url.searchParams.set("format","metadata");
-    url.searchParams.append("metadataHeaders","From");
-    url.searchParams.append("metadataHeaders","To");
-    url.searchParams.append("metadataHeaders","Subject");
-    url.searchParams.append("metadataHeaders","Date");
-    url.searchParams.append("metadataHeaders","Message-Id");
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` }});
-    if (!res.ok) {
-      console.warn("gmail get failed", id, await res.text());
-      continue;
+    const missing = Object.entries({ SB_URL, SB_KEY, CLIENT_ID, CLIENT_SECRET, REFRESH })
+      .filter(([, v]) => !v).map(([k]) => k);
+    if (missing.length) {
+      debug.missing_envs = missing;
+      return new Response(JSON.stringify({ ok: false, debug }), { status: 500, headers: { "content-type": "application/json" } });
     }
-    const msg = await res.json();
 
-    const dateMs = Number(msg.internalDate); // ms since epoch
-    const sentAt = new Date(dateMs).toISOString();
-    const tsRange = `[${sentAt},${sentAt})`;
+    const sb = createClient(SB_URL!, SB_KEY!, { auth: { persistSession: false } });
 
-    const hdrs = msg.payload?.headers ?? [];
-    const details = {
-      threadId: msg.threadId,
-      from: header(hdrs,"From"),
-      to: header(hdrs,"To"),
-      subject: header(hdrs,"Subject"),
-      messageId: header(hdrs,"Message-Id"),
-      labelIds: msg.labelIds ?? [],
-      // snippet is OK; avoid bodies for privacy
-      snippet: msg.snippet ?? null,
-    };
+    // 1) Access token
+    const accessToken = await refreshAccessToken(REFRESH!, CLIENT_ID!, CLIENT_SECRET!);
+    debug.token = "ok";
 
-    const { error } = await sb.from("events").upsert({
-      kind: "email",
-      ts_range: tsRange,
-      ingested_at: new Date().toISOString(),
-      source_id: src.source_id,
-      source_ref: msg.id,
-      confidence: 1.0,
-      details
-    }, { onConflict: "source_id,source_ref" });
+    // 2) Source row
+    const { data: src, error: srcErr } = await sb.from("sources").select("source_id").eq("kind","gmail").limit(1).single();
+    if (srcErr || !src) {
+      debug.source_error = srcErr ?? "no gmail source row";
+      return new Response(JSON.stringify({ ok: false, debug }), { status: 500, headers: { "content-type": "application/json" } });
+    }
+    debug.source_id = src.source_id;
 
-    if (error) console.error("events upsert error", error);
+    // 3) List a small batch of message IDs (7 days)
+    const listUrl = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
+    listUrl.searchParams.set("q", "newer_than:7d -in:drafts");
+    listUrl.searchParams.set("maxResults","10");
+    const listRes = await fetch(listUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
+    const listText = await listRes.text();
+    if (!listRes.ok) {
+      debug.gmail_list_error = { status: listRes.status, body: listText.slice(0, 400) };
+      return new Response(JSON.stringify({ ok:false, debug }), { status: 500, headers: { "content-type": "application/json" } });
+    }
+    const listJson = JSON.parse(listText);
+    const ids: string[] = (listJson.messages ?? []).map((m: any) => m.id);
+    debug.listed_ids = ids.length;
+
+    // 4) Fetch metadata for each ID and upsert a few
+    let inserted = 0;
+    for (const id of ids) {
+      const url = new URL(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}`);
+      url.searchParams.set("format","metadata");
+      url.searchParams.append("metadataHeaders","From");
+      url.searchParams.append("metadataHeaders","To");
+      url.searchParams.append("metadataHeaders","Subject");
+      url.searchParams.append("metadataHeaders","Date");
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+      const txt = await res.text();
+      if (!res.ok) {
+        debug.gmail_get_error = { status: res.status, body: txt.slice(0, 400) };
+        return new Response(JSON.stringify({ ok:false, debug }), { status: 500, headers: { "content-type": "application/json" } });
+      }
+      const msg = JSON.parse(txt);
+      if (!debug.sample) {
+        const hdrs = msg.payload?.headers ?? [];
+        debug.sample = {
+          id: msg.id,
+          internalDate: msg.internalDate,
+          snippet: msg.snippet,
+          headers: {
+            From: hdrs.find((h: any) => h.name === "From")?.value ?? null,
+            Subject: hdrs.find((h: any) => h.name === "Subject")?.value ?? null,
+            Date: hdrs.find((h: any) => h.name === "Date")?.value ?? null,
+          }
+        };
+      }
+      const hdrs = msg.payload?.headers ?? [];
+      const get = (name: string) =>
+        hdrs.find((h: any) => h.name?.toLowerCase() === name.toLowerCase())?.value ?? null;
+
+      // Prefer Gmail's internalDate (epoch ms). Fallback to RFC2822 Date header.
+      const ms = Number(msg.internalDate ?? 0) || Date.parse(get("Date") ?? "");
+      if (!ms || Number.isNaN(ms)) {
+        console.error("Missing/invalid timestamp for message", msg.id);
+        continue; // Skip this message
+      }
+
+      // Build a **non-empty** 1-second range for point events
+      const startISO = new Date(ms).toISOString();
+      const endISO   = new Date(ms + 1000).toISOString(); // +1s
+      const tsRange  = `[${startISO},${endISO})`;
+
+      const { error } = await sb.from("events").upsert({
+        kind: "email",
+        ts_range: tsRange,                 // <-- IMPORTANT
+        source_id: src.source_id,
+        source_ref: msg.id,
+        confidence: 1.0,
+        details: {
+          threadId: msg.threadId,
+          from: get("From"),
+          to: get("To"),
+          subject: get("Subject"),
+          date_header: get("Date"),        // keep the raw Date header too (optional)
+          internalDate: ms,                // <-- store epoch ms for future backfills
+          labelIds: msg.labelIds ?? [],
+          snippet: msg.snippet ?? null
+        }
+      }, { onConflict: "source_id,source_ref" });
+      if (error) {
+        debug.upsert_error = {
+          code: error.code,
+          message: error.message,
+          details: error.details,
+          hint: error.hint,
+        };
+        return new Response(JSON.stringify({ ok:false, debug }), {
+          status: 500, headers: { "content-type": "application/json" }
+        });
+      }
+      inserted++;
+    }
+
+    debug.inserted = inserted;
+    return new Response(JSON.stringify({ ok: true, debug }), { status: 200, headers: { "content-type": "application/json" } });
+  } catch (e) {
+    debug.error = e instanceof Error ? e.message : JSON.stringify(e);
+    return new Response(JSON.stringify({ ok: false, debug }), { status: 500, headers: { "content-type": "application/json" } });
   }
-
-  // Update watermark (last run time)
-  await sb.from("sources")
-    .update({ watermark_ts: new Date().toISOString(), updated_at: new Date().toISOString() })
-    .eq("source_id", src.source_id);
-
-  return new Response("ok");
 });
