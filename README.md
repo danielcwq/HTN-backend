@@ -114,6 +114,65 @@ The BLE bridge sends JSON data to the WebSocket endpoint:
 - `exploratory/intervals.py` - Intervals.icu integration (if needed)
 - `exploratory/proplus.py` - Additional HRM Pro Plus utilities
 
+## Supabase Integration
+
+This project uses Supabase Functions to ingest data from external services like Google Calendar and Gmail. These functions are written in TypeScript and run on Deno.
+
+### Structure
+
+The Supabase functions are located in the `supabase/functions` directory:
+
+-   `ingest-gcal/`: Ingests events from a specified Google Calendar.
+-   `ingest-gmail/`: Ingests email metadata from a Gmail account.
+-   `_shared/`: Contains shared code, such as Google OAuth token refresh logic.
+
+### How it Works
+
+1.  **Authentication**: The functions use a long-lived Google OAuth refresh token to generate new access tokens for each run.
+2.  **Data Fetching**: They connect to the Google Calendar and Gmail APIs to fetch recent events and emails.
+3.  **Data Storage**: The fetched data is then transformed and `upserted` into an `events` table in your Supabase database. Each event is linked to a `source` (e.g., `gcal`, `gmail`).
+
+### Environment Variables
+
+To run these functions, you must set the following environment variables in your Supabase project (or in a local `.env` file for local development):
+
+-   `SUPABASE_URL`: Your project's Supabase URL.
+-   `SERVICE_ROLE_KEY`: Your project's service role key for admin-level access.
+-   `GOOGLE_CLIENT_ID`: Your Google Cloud project's client ID.
+-   `GOOGLE_CLIENT_SECRET`: Your Google Cloud project's client secret.
+-   `GOOGLE_REFRESH_TOKEN`: A valid Google OAuth refresh token with access to the required scopes (Gmail and/or Calendar).
+
+### Database Schema
+
+The functions expect the following tables to exist:
+
+-   `sources`: A table to define the data sources. It should have at least `source_id` (UUID), `kind` (text, e.g., 'gcal', 'gmail'), and `last_token` (text, for sync tokens).
+-   `events`: The main table for storing ingested data. Key columns include:
+    -   `kind`: The type of event (e.g., 'email', 'calendar_event').
+    -   `ts_range`: A `tstzrange` representing the event's time.
+    -   `source_id`: A foreign key to the `sources` table.
+    -   `source_ref`: The original ID from the source system (e.g., Gmail message ID).
+    -   `details`: A JSONB column for storing raw metadata.
+
+To ensure `upserts` work correctly, you need a unique constraint on the `events` table:
+
+```sql
+ALTER TABLE events
+ADD CONSTRAINT events_source_id_source_ref_key UNIQUE (source_id, source_ref);
+```
+
+### Deployment
+
+To deploy a function, use the Supabase CLI:
+
+```bash
+# Deploy the Gmail ingestion function
+supabase functions deploy ingest-gmail
+
+# Deploy the Google Calendar ingestion function
+supabase functions deploy ingest-gcal
+```
+
 ## License
 
 This project is for personal/educational use.
