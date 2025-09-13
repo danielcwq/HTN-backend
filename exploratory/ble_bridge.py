@@ -195,7 +195,10 @@ async def stream(args):
                         seq += 1
                         if now - last_sent_ts >= 0.2:
                             last_sent_ts = now
-                            asyncio.create_task(ws.send(json.dumps(obj)))
+                            try:
+                                asyncio.create_task(ws.send(json.dumps(obj)))
+                            except Exception:
+                                pass  # Ignore send errors in callback
 
                     await client.start_notify(HR_CHAR, handle)
                     print("Subscribed to Heart Rate Measurement notifications")
