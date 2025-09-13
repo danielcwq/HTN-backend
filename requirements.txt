@@ -4,3 +4,4 @@ websockets
 cohere
 bleak 
 websockets
+sqlite3

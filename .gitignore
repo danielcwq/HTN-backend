@@ -1,2 +1,6 @@
 .venv/
 cohereAPI.py
+HRM/localDB/hrm_data.db
+HRM/localDB/hrm_data.db-shm
+HRM/localDB/hrm_data.db-wal
+HRM/localDB/__pycache__/
