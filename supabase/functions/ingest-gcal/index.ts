@@ -4,12 +4,12 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { refreshAccessToken } from "../_shared/google_oauth.ts";
 
 const SB_URL = Deno.env.get("SUPABASE_URL")!;
-const SB_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const SB_KEY = Deno.env.get("SERVICE_ROLE_KEY")!;
 const sb = createClient(SB_URL, SB_KEY);
 
 const CLIENT_ID = Deno.env.get("GOOGLE_CLIENT_ID")!;
 const CLIENT_SECRET = Deno.env.get("GOOGLE_CLIENT_SECRET")!;
-const REFRESH = Deno.env.get("GCAL_REFRESH_TOKEN")!;
+const REFRESH = Deno.env.get("GOOGLE_REFRESH_TOKEN")!;
 
 function toISO(d: string | undefined, tz = "America/Toronto"): string | null {
   // Calendar all-day events come as date (no time). Interpret in local TZ.

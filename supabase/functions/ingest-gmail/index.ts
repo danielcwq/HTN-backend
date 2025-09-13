@@ -2,6 +2,10 @@
 import { serve } from "https://deno.land/std/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
+console.log("CLIENT_ID:", (Deno.env.get("GOOGLE_CLIENT_ID")||"").slice(0,12), "…");
+console.log("Using refresh token:", (Deno.env.get("GOOGLE_REFRESH_TOKEN")||"").slice(0,8), "…");
+
+
 async function refreshAccessToken(refreshToken: string, clientId: string, clientSecret: string) {
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
