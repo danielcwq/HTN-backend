@@ -69,17 +69,46 @@ def parse_hr_measurement(data):
         "rr_intervals": rr_intervals
     }
 
-async def discover_device(name_substring="HRM"):
-    """Find HRM device"""
-    print(f"Scanning for devices with '{name_substring}' in name...")
-    devices = await BleakScanner.discover(timeout=5.0)
+async def discover_device(name_substring="HRM", max_retries=10):
+    """Find HRM device with retry logic"""
+    for attempt in range(1, max_retries + 1):
+        print(f"\n🔍 Scanning for devices with '{name_substring}' in name... (Attempt {attempt}/{max_retries})")
+        
+        try:
+            devices = await BleakScanner.discover(timeout=5.0)
+            
+            if devices:
+                print(f"   Found {len(devices)} Bluetooth device(s)")
+                
+                # First look for exact name match
+                for device in devices:
+                    if name_substring.lower() in (device.name or "").lower():
+                        print(f"✅ Found: {device.name} ({device.address})")
+                        return device.address
+                
+                # Then look for any HR device
+                for device in devices:
+                    # Check if it's advertising HR service
+                    if hasattr(device, 'metadata') and device.metadata:
+                        uuids = device.metadata.get('uuids', [])
+                        if any("180d" in uuid.lower() for uuid in uuids):
+                            print(f"✅ Found HR device: {device.name or 'Unknown'} ({device.address})")
+                            return device.address
+            else:
+                print("   No Bluetooth devices found")
+                
+        except Exception as e:
+            print(f"   Scan error: {e}")
+        
+        if attempt < max_retries:
+            print(f"   No '{name_substring}' device found. Make sure:")
+            print("     • HRM is worn (needs skin contact to activate)")
+            print("     • Strap electrodes are moist")
+            print("     • Device is not connected to phone/watch")
+            print("   Retrying in 3 seconds...")
+            await asyncio.sleep(3)
     
-    for device in devices:
-        if name_substring.lower() in (device.name or "").lower():
-            print(f"Found: {device.name} ({device.address})")
-            return device.address
-    
-    print(f"No device found with '{name_substring}' in name")
+    print(f"\n❌ No device found after {max_retries} attempts")
     return None
 
 async def explore_device(address):
@@ -191,10 +220,14 @@ async def main():
     print("HRM Pro Plus BLE Discovery Tool")
     print("=" * 60)
     
-    # Find device
-    address = await discover_device("HRM")
+    # Find device with retry
+    address = await discover_device("HRM", max_retries=10)
     if not address:
-        print("Please ensure your HRM Pro Plus is on and in range")
+        print("\nTroubleshooting tips:")
+        print("  1. Ensure the HRM Pro Plus is worn on your chest")
+        print("  2. Wet the electrode pads for better conductivity")
+        print("  3. Check that Bluetooth is enabled on your Mac")
+        print("  4. Disconnect from Garmin Connect app if connected")
         return
     
     # Explore device
