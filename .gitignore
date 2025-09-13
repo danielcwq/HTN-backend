@@ -4,3 +4,6 @@ HRM/localDB/hrm_data.db
 HRM/localDB/hrm_data.db-shm
 HRM/localDB/hrm_data.db-wal
 HRM/localDB/__pycache__/
+/supabase/.temp/
+client_secret_499726907970-n01g8r0rh8n86qc6n7d3ij6jvphpktnf.apps.googleusercontent.com.json
+.env.prod
