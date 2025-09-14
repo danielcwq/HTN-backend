@@ -16,3 +16,4 @@ local-worker/**/*.pyc
 .env
 hr_sync.log
 .hr_sync_state.json
+quick_stress_check.sh
