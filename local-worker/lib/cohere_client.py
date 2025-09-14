@@ -68,8 +68,22 @@ class CohereClient:
             
             latency_ms = (time.time() - start_time) * 1000
             
-            # Extract and parse response
-            response_text = response.message.content[0].text
+            # Extract and parse response - handle reasoning model response
+            content_item = response.message.content[0]
+            logger.debug(f"Content item type: {type(content_item)}")
+            logger.debug(f"Content item attributes: {dir(content_item)}")
+            
+            if hasattr(content_item, 'text'):
+                response_text = content_item.text
+            elif hasattr(content_item, 'content'):
+                response_text = content_item.content
+            elif hasattr(content_item, 'message'):
+                response_text = content_item.message
+            else:
+                # For reasoning models, try to extract meaningful content
+                response_text = str(content_item)
+                logger.warning(f"Unknown content structure, using string representation: {response_text[:200]}...")
+            
             inference_result = self._extract_json_response(response_text)
             
             # Build metadata

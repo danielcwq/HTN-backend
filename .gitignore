@@ -7,3 +7,12 @@ HRM/localDB/__pycache__/
 /supabase/.temp/
 client_secret_499726907970-n01g8r0rh8n86qc6n7d3ij6jvphpktnf.apps.googleusercontent.com.json
 .env.prod
+
+# Local worker environment and logs
+local-worker/.env
+local-worker/logs/
+local-worker/__pycache__/
+local-worker/**/*.pyc
+.env
+hr_sync.log
+.hr_sync_state.json

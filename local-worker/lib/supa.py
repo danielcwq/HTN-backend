@@ -178,10 +178,14 @@ class SupabaseClient:
             'ts_range': ts_range,
             'value': value,
             'model_version': model_version,
-            'input_refs': input_refs or {},
-            'ingested_at': datetime.now().isoformat()
+            'input_refs': input_refs or {}
         }
         
-        response = self.client.table('inferences').upsert(record).execute()
-        logger.info(f"Upserted inference: {namespace}.{name} for {ts_range}")
-        return response.data[0] if response.data else None
+        try:
+            response = self.client.table('inferences').upsert(record).execute()
+            logger.info(f"Upserted inference: {namespace}.{name} for {ts_range}")
+            return response.data[0] if response.data else None
+        except Exception as e:
+            logger.error(f"Failed to upsert inference: {e}")
+            logger.error(f"Record being inserted: {record}")
+            raise

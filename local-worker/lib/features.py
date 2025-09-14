@@ -379,7 +379,11 @@ class FeatureComputer:
         ts_range = event.get('ts_range', '')
         if ts_range.startswith('['):
             start_str = ts_range.split(',')[0][1:]  # Remove '['
-            return datetime.fromisoformat(start_str.replace('Z', '+00:00'))
+            # Clean up the string - remove extra quotes and fix timezone
+            start_str = start_str.strip('"').replace('+00', '+00:00')
+            if start_str.endswith('Z'):
+                start_str = start_str[:-1] + '+00:00'
+            return datetime.fromisoformat(start_str)
         return datetime.now()
     
     def _extract_event_end(self, event: Dict[str, Any]) -> Optional[datetime]:
@@ -387,5 +391,233 @@ class FeatureComputer:
         ts_range = event.get('ts_range', '')
         if ',' in ts_range and ts_range.endswith(')'):
             end_str = ts_range.split(',')[1][:-1]  # Remove ')'
-            return datetime.fromisoformat(end_str.replace('Z', '+00:00'))
+            # Clean up the string - remove extra quotes and fix timezone
+            end_str = end_str.strip('"').replace('+00', '+00:00')
+            if end_str.endswith('Z'):
+                end_str = end_str[:-1] + '+00:00'
+            return datetime.fromisoformat(end_str)
         return None
+    
+    def compute_realtime_features(
+        self,
+        events: List[Dict[str, Any]],
+        change_context: Dict[str, Any],
+        analysis_hours: int = 12
+    ) -> Dict[str, Any]:
+        """
+        Compute features for real-time stress analysis triggered by calendar changes
+        
+        Args:
+            events: Recent events (past 4 hours + next 8 hours)
+            change_context: Context about what triggered this analysis
+            analysis_hours: Total hours of data to analyze
+        
+        Returns:
+            Dictionary of computed features optimized for real-time analysis
+        """
+        features = {
+            "analysis_hours": analysis_hours,
+            "computed_at": datetime.now().isoformat(),
+            "spec_version": f"{self.feature_version}-realtime",
+            "trigger_context": change_context
+        }
+        
+        now = datetime.now()
+        
+        # Separate events by type and time
+        calendar_events = [e for e in events if e['kind'] == 'calendar']
+        email_events = [e for e in events if e['kind'] == 'email']
+        
+        # Time-based separation
+        past_events = []
+        upcoming_events = []
+        
+        for event in calendar_events:
+            event_start = self._extract_event_start(event)
+            if event_start < now:
+                past_events.append(event)
+            else:
+                upcoming_events.append(event)
+        
+        # Real-time calendar features
+        calendar_features = self._compute_realtime_calendar_features(
+            past_events, upcoming_events, now
+        )
+        features.update(calendar_features)
+        
+        # Email volume features
+        email_features = self._compute_realtime_email_features(email_events, now)
+        features.update(email_features)
+        
+        # Stress indicator features
+        stress_features = self._compute_realtime_stress_features(
+            calendar_events, change_context, now
+        )
+        features.update(stress_features)
+        
+        # Temporal patterns
+        temporal_features = self._compute_realtime_temporal_features(
+            upcoming_events, now
+        )
+        features.update(temporal_features)
+        
+        return features
+    
+    def _compute_realtime_calendar_features(
+        self, 
+        past_events: List[Dict[str, Any]], 
+        upcoming_events: List[Dict[str, Any]], 
+        now: datetime
+    ) -> Dict[str, Any]:
+        """Compute calendar-specific features for real-time analysis"""
+        
+        features = {}
+        
+        # Event counts by time window
+        features['past_4h_events'] = len(past_events)
+        features['next_4h_events'] = len([e for e in upcoming_events 
+                                        if self._extract_event_start(e) < now + timedelta(hours=4)])
+        features['next_8h_events'] = len([e for e in upcoming_events 
+                                        if self._extract_event_start(e) < now + timedelta(hours=8)])
+        
+        # Meeting density analysis
+        if upcoming_events:
+            next_2h_events = [e for e in upcoming_events 
+                            if self._extract_event_start(e) < now + timedelta(hours=2)]
+            features['next_2h_density'] = len(next_2h_events)
+            
+            # Calculate minimum gap between upcoming events
+            upcoming_starts = [self._extract_event_start(e) for e in upcoming_events[:5]]
+            upcoming_starts.sort()
+            
+            min_gap_minutes = float('inf')
+            for i in range(len(upcoming_starts) - 1):
+                gap = (upcoming_starts[i + 1] - upcoming_starts[i]).total_seconds() / 60
+                min_gap_minutes = min(min_gap_minutes, gap)
+            
+            features['min_gap_minutes'] = min_gap_minutes if min_gap_minutes != float('inf') else None
+            features['has_back_to_back'] = min_gap_minutes < 15 if min_gap_minutes != float('inf') else False
+        else:
+            features['next_2h_density'] = 0
+            features['min_gap_minutes'] = None
+            features['has_back_to_back'] = False
+        
+        # Recent activity level
+        recent_activity = len([e for e in past_events 
+                             if self._extract_event_start(e) > now - timedelta(hours=2)])
+        features['recent_activity_2h'] = recent_activity
+        
+        return features
+    
+    def _compute_realtime_email_features(
+        self, 
+        email_events: List[Dict[str, Any]], 
+        now: datetime
+    ) -> Dict[str, Any]:
+        """Compute email-related features for real-time analysis"""
+        
+        features = {}
+        
+        # Email volume by time window
+        emails_1h = len([e for e in email_events 
+                        if self._extract_event_start(e) > now - timedelta(hours=1)])
+        emails_4h = len([e for e in email_events 
+                        if self._extract_event_start(e) > now - timedelta(hours=4)])
+        
+        features['emails_1h_count'] = emails_1h
+        features['emails_4h_count'] = emails_4h
+        features['email_rate_4h'] = emails_4h / 4.0  # emails per hour
+        
+        return features
+    
+    def _compute_realtime_stress_features(
+        self, 
+        calendar_events: List[Dict[str, Any]], 
+        change_context: Dict[str, Any], 
+        now: datetime
+    ) -> Dict[str, Any]:
+        """Compute stress-specific indicators for real-time analysis"""
+        
+        features = {}
+        
+        # Stress keyword analysis
+        stress_keywords = [
+            'deadline', 'urgent', 'crisis', 'emergency', 'critical',
+            'interview', 'review', 'presentation', 'demo', 'pitch',
+            'conflict', 'issue', 'problem', 'escalation'
+        ]
+        
+        stress_event_count = 0
+        high_stress_event_count = 0
+        
+        for event in calendar_events:
+            summary = event.get('details', {}).get('summary', '').lower()
+            
+            # Count stress keywords
+            keyword_count = sum(1 for keyword in stress_keywords if keyword in summary)
+            if keyword_count > 0:
+                stress_event_count += 1
+            if keyword_count > 1:
+                high_stress_event_count += 1
+        
+        features['stress_events_count'] = stress_event_count
+        features['high_stress_events_count'] = high_stress_event_count
+        features['stress_event_ratio'] = stress_event_count / max(len(calendar_events), 1)
+        
+        # Time-of-day stress factors
+        late_events = len([e for e in calendar_events 
+                          if self._extract_event_start(e).hour >= 19])  # After 7 PM
+        early_events = len([e for e in calendar_events 
+                           if self._extract_event_start(e).hour <= 7])   # Before 8 AM
+        
+        features['late_evening_events'] = late_events
+        features['early_morning_events'] = early_events
+        features['off_hours_events'] = late_events + early_events
+        
+        # Change context analysis
+        change_type = change_context.get('change_type', 'unknown')
+        features['change_type'] = change_type
+        features['change_is_addition'] = change_type in ['created', 'added']
+        features['change_is_modification'] = change_type in ['updated', 'modified']
+        
+        return features
+    
+    def _compute_realtime_temporal_features(
+        self, 
+        upcoming_events: List[Dict[str, Any]], 
+        now: datetime
+    ) -> Dict[str, Any]:
+        """Compute temporal patterns for real-time analysis"""
+        
+        features = {}
+        
+        if not upcoming_events:
+            features['next_event_minutes'] = None
+            features['longest_event_minutes'] = None
+            features['avg_event_duration'] = None
+            return features
+        
+        # Time to next event
+        next_event_start = min(self._extract_event_start(e) for e in upcoming_events)
+        next_event_minutes = (next_event_start - now).total_seconds() / 60
+        features['next_event_minutes'] = max(0, next_event_minutes)
+        
+        # Event duration analysis
+        durations = []
+        for event in upcoming_events:
+            start = self._extract_event_start(event)
+            end = self._extract_event_end(event)
+            if start and end:
+                duration_minutes = (end - start).total_seconds() / 60
+                durations.append(duration_minutes)
+        
+        if durations:
+            features['avg_event_duration'] = statistics.mean(durations)
+            features['longest_event_minutes'] = max(durations)
+            features['has_long_events'] = any(d > 120 for d in durations)  # >2 hours
+        else:
+            features['avg_event_duration'] = None
+            features['longest_event_minutes'] = None
+            features['has_long_events'] = False
+        
+        return features

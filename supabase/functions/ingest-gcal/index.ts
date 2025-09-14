@@ -1,19 +1,18 @@
-// deno-lint-ignore-file no-explicit-any
+// supabase/functions/ingest-gcal/index.ts
 import { serve } from "https://deno.land/std/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { refreshAccessToken } from "../_shared/google_oauth.ts";
 
-const SB_URL = Deno.env.get("SUPABASE_URL")!;
-const SB_KEY = Deno.env.get("SERVICE_ROLE_KEY")!;
-const sb = createClient(SB_URL, SB_KEY);
+const sb = createClient(
+  Deno.env.get("SUPABASE_URL")!,
+  Deno.env.get("SERVICE_ROLE_KEY")!
+);
 
 const CLIENT_ID = Deno.env.get("GOOGLE_CLIENT_ID")!;
 const CLIENT_SECRET = Deno.env.get("GOOGLE_CLIENT_SECRET")!;
 const REFRESH = Deno.env.get("GOOGLE_REFRESH_TOKEN")!;
 
-function toISO(d: string | undefined, tz = "America/Toronto"): string | null {
-  // Calendar all-day events come as date (no time). Interpret in local TZ.
-  if (!d) return null;
+function toIso(d: string): string {
   // If it's a date 'YYYY-MM-DD', treat as local midnight → ISO
   if (/^\d{4}-\d{2}-\d{2}$/.test(d)) {
     // Construct as local midnight then convert to ISO
@@ -36,19 +35,25 @@ serve(async () => {
   let pageToken: string | undefined;
   let syncToken: string | undefined = src.last_token ?? undefined;
 
-  // Build initial URL
+  // Build initial URL with VERY LIMITED time range
   const base = new URL("https://www.googleapis.com/calendar/v3/calendars/primary/events");
   base.searchParams.set("singleEvents","true");
   base.searchParams.set("showDeleted","false");
-  base.searchParams.set("maxResults","2500");
-  // Use syncToken if we have one; otherwise do an initial 90-day backfill
+  base.searchParams.set("maxResults","50"); // VERY LIMITED: Only 50 events max
+  
+  // Use syncToken if we have one; otherwise do a VERY LIMITED backfill
   if (syncToken) {
     base.searchParams.set("syncToken", syncToken);
   } else {
-    const timeMin = new Date(Date.now() - 90*86400_000).toISOString();
+    // VERY LIMITED: Only get events from last 3 days to next 14 days
+    const timeMin = new Date(Date.now() - 3*86400_000).toISOString();  // 3 days back
+    const timeMax = new Date(Date.now() + 14*86400_000).toISOString(); // 14 days forward
     base.searchParams.set("timeMin", timeMin);
+    base.searchParams.set("timeMax", timeMax);
+    console.log(`Very limited ingestion: ${timeMin} to ${timeMax} (max 50 events)`);
   }
 
+  let eventCount = 0;
   do {
     const url = new URL(base.toString());
     if (pageToken) url.searchParams.set("pageToken", pageToken);
@@ -57,45 +62,66 @@ serve(async () => {
     const json = await res.json();
     if (!res.ok) {
       // If syncToken is expired, clear it and let next run do a fresh load
-      if (json?.error?.code === 410) {
-        await sb.from("sources").update({ last_token: null }).eq("source_id", src.source_id);
-        return new Response("syncToken expired; cleared", { status: 200 });
+      if (res.status === 410) {
+        await sb.from("sources").update({last_token: null}).eq("source_id", src.source_id);
       }
-      throw new Error(`gcal list failed: ${res.status} ${JSON.stringify(json)}`);
+      console.error("gcal list failed:", res.status, json);
+      return new Response(`gcal failed: ${res.status}`, { status: 500 });
     }
 
-    for (const ev of json.items ?? []) {
-      // Compute ts_range
-      const startISO = toISO(ev.start?.dateTime ?? ev.start?.date);
-      const endISO   = toISO(ev.end?.dateTime ?? ev.end?.date);
-      if (!startISO || !endISO) continue; // skip malformed
+    // Process events
+    for (const item of json.items ?? []) {
+      if (item.status === "cancelled") {
+        await sb.from("events").delete()
+          .eq("source_id", src.source_id)
+          .eq("source_ref", item.id);
+        continue;
+      }
 
-      const tsRange = `[${startISO},${endISO})`;
+      const start = item.start?.dateTime || item.start?.date;
+      const end = item.end?.dateTime || item.end?.date;
+      if (!start || !end) continue;
 
-      const details = {
-        summary: ev.summary ?? null,
-        status: ev.status ?? null,
-        location: ev.location ?? null,
-        hangoutLink: ev.hangoutLink ?? null,
-        attendees: (ev.attendees ?? []).map((a: any) => ({ email: a.email, responseStatus: a.responseStatus })),
-        organizer: ev.organizer?.email ?? null
-      };
+      let startIso: string, endIso: string;
+      const allDay = !item.start?.dateTime;
+      if (allDay) {
+        startIso = toIso(start);
+        endIso = toIso(end);
+      } else {
+        startIso = new Date(start).toISOString();
+        endIso = new Date(end).toISOString();
+      }
 
-      const { error } = await sb.from("events").upsert({
+      await sb.from("events").upsert({
         kind: "calendar",
-        ts_range: tsRange,
-        ingested_at: new Date().toISOString(),
+        ts_range: `[${startIso},${endIso})`,
         source_id: src.source_id,
-        source_ref: ev.id,
+        source_ref: item.id,
         confidence: 1.0,
-        details
+        details: {
+          summary: item.summary || null,
+          status: item.status || null,
+          location: item.location || null,
+          description: item.description || null,
+          attendees: item.attendees || null,
+          created: item.created || null,
+          updated: item.updated || null
+        },
+        ingested_at: new Date().toISOString()
       }, { onConflict: "source_id,source_ref" });
 
-      if (error) console.error("events upsert error", error);
+      eventCount++;
     }
 
     pageToken = json.nextPageToken;
-    syncToken = json.nextSyncToken ?? syncToken;
+    syncToken = json.nextSyncToken;
+
+    // SAFETY: Stop if we've processed too many events
+    if (eventCount >= 50) {
+      console.log(`Reached event limit of 50, stopping ingestion`);
+      break;
+    }
+
   } while (pageToken);
 
   // Persist latest syncToken + watermark
@@ -105,5 +131,6 @@ serve(async () => {
     updated_at: new Date().toISOString()
   }).eq("source_id", src.source_id);
 
+  console.log(`Limited calendar ingestion complete. Events processed: ${eventCount}. SyncToken: ${syncToken ? 'updated' : 'none'}`);
   return new Response("ok");
 });

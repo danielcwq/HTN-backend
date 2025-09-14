@@ -80,6 +80,22 @@ def multiday_forecast_window(days_ahead: int = 4) -> Tuple[datetime, datetime]:
     end_time = start_time + timedelta(days=days_ahead)
     return start_time, end_time
 
+def realtime_window(hours_back: int = 4, hours_ahead: int = 8) -> Tuple[datetime, datetime]:
+    """
+    Calculate time window for real-time analysis
+    
+    Args:
+        hours_back: How many hours back to look for context
+        hours_ahead: How many hours ahead to analyze
+    
+    Returns:
+        (start_time, end_time) tuple
+    """
+    now = now_in_tz()
+    start_time = now - timedelta(hours=hours_back)
+    end_time = now + timedelta(hours=hours_ahead)
+    return start_time, end_time
+
 def get_inference_window(window_type: str, duration_minutes: int = 60) -> Tuple[datetime, datetime]:
     """
     Calculate time window for inference results

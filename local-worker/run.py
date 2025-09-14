@@ -66,7 +66,10 @@ def check_data_quality(supa: SupabaseClient, metrics: MetricsLogger, job_id: str
         for source in sources:
             if source.get('watermark_ts'):
                 watermark = datetime.fromisoformat(source['watermark_ts'].replace('Z', '+00:00'))
-                lag_seconds = (datetime.now() - watermark).total_seconds()
+                # Use timezone-aware datetime for comparison
+                from windows import now_in_tz
+                current_time = now_in_tz()
+                lag_seconds = (current_time - watermark).total_seconds()
                 source_lag[source['kind']] = lag_seconds
                 
                 if lag_seconds > max_lag:
@@ -187,6 +190,7 @@ def run_multiday_inference(dry_run: bool = False) -> bool:
         )
         
         logger.info(f"Generated inference with confidence: {inference_result.get('confidence', 'unknown')}")
+        logger.debug(f"Full inference result: {inference_result}")
         
         # Log inference metrics
         metrics.log_inference_stats(
